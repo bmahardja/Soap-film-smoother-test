@@ -5,8 +5,8 @@
 library(mgcv)
 library(rgeos)
 library(sp)
-setwd("~/GitHub/Bottom_Surface_Temp_Analysis/soap_checker")
-source("autocrunch.R")
+# No need to setwd if working within an Rstudio project. All paths are automatically relative to base project folder (containing .Rproj file)
+source("soap_checker/autocrunch.R")
 
 soap_check <- function(bnd, knots=NULL, data=NULL, plot=TRUE,
                        tol=sqrt(.Machine$double.eps)){

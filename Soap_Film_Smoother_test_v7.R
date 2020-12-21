@@ -3,7 +3,6 @@
 
 library(tidyverse)
 library(deltareportr)
-library(mgcv)
 library(lubridate)
 library(hms)
 library(sf)
@@ -21,14 +20,12 @@ library(rgdal)
 library(rmapshaper)
 library(broom)
 library(rgeos)
+library(mgcv)
 
 source("soap_checker/soap_check.R")
 
-#Path to local drive
-root <- "~/GitHub/Soap-film-smoother-test"
-setwd(root)
-
-data_root<-file.path(root,"data-raw")
+# No need to specify absolute file paths in an Rstudio project (if you open it as a project).
+data_root<-file.path("data-raw")
 
 #Read in bay-Delta shape outline shape file that Mike Beakes created
 Delta.aut <- readOGR(file.path(data_root,"Bay_Delta_Poly_Outline_UTM10", "Bay_Delta_Poly_Outline_UTM10.shp"))
@@ -57,12 +54,13 @@ border.aut <- lapply(nr, function(n) as.list.data.frame(border.aut[[n]]))
 ################# Setting knots using 10x10 points ############
 ###################################################
 
-N <- 10
+N <- 20
 gx <- seq(min(Delta.xy.aut[,1]), max(Delta.xy.aut[,1]), len = N)
 gy <- seq(min(Delta.xy.aut[,2]), max(Delta.xy.aut[,2]), len = N)
 gp <- expand.grid(gx, gy)
 names(gp) <- c("x","y")
 knots <- gp[with(gp, inSide(border.aut, x, y)), ]
+row.names(knots)<-1:nrow(knots)
 
 
 plot(Delta.aut, col="grey")
@@ -180,30 +178,35 @@ points(Data_subset_outside$x,Data_subset_outside$y, pch=21, bg="red")
 soap_check(bnd = border.aut, knots = knots)
 
 
+
+# Editing out knots too close to the border with sf ----------------------------------------------------------
+Delta.aut_sf<-st_as_sf(Delta.aut)
+knots_sf<-st_as_sf(knots, coords=c("x","y"), crs=st_crs(Delta.aut_sf), remove=F)
+
+ggplot()+
+  geom_sf(data=Delta.aut_sf)+
+  geom_sf(data=knots_sf, color="red")+
+  theme_bw()
+
+distances<-Delta.aut_sf %>%
+  st_cast(to = 'LINESTRING') %>% #TUrn polygon into linestring
+  st_distance(y = knots_sf) # Get distance of each point from that perimeter linestring
+
+#remove knots within 400 m of boundary
+knots_sf_edited<-knots_sf[-which(distances<units::set_units(400, "m")),]
+
+ggplot()+
+  geom_sf(data=Delta.aut_sf)+
+  geom_sf(data=knots_sf, color="red")+
+  geom_sf(data=knots_sf_edited, color="blue")+
+  theme_bw()
+
+knots_edited<-knots_sf_edited%>%
+  st_drop_geometry()
+
 ############### Fit test model  ######################
 m_test <- bam(Temperature_bottom ~ s(x, y, k = 5, bs = "so", xt = list(bnd = border.aut)),
-              data = Data_subset_inside, family = tw(), method = "REML", knots = knots)
-
-#Gives the following error
-#Error in crunch.knots(ret$G, knots, x0, y0, dx, dy) : 
-#  knot 7 is on or outside boundary
-
-#Continue running m_test iterations until the model is happy with the remaining knots
-knots_edit<-knots[-c(7),]
-knots_edit<-knots_edit[-c(11),]
-knots_edit<-knots_edit[-c(11),]
-
-plot(Delta.aut, col="grey")
-points(knots, pch=21, bg="red")
-points(knots_edit, pch=21, bg="purple")
-
-############### Test model should work now with knots_edit  ######################
-
-m_test <- bam(Temperature_bottom ~ s(x, y, k = 5, bs = "so", xt = list(bnd = border.aut)),
-          data = Data_subset_inside, family = tw(), method = "REML", knots = knots_edit)
-
-summary(m_test)
-plot(m_test)
+              data = Data_subset_inside, family = tw(), method = "REML", knots = knots_edited)
 
 ########################################################################################################################################################################
 ########Test temperature stratification model
@@ -229,45 +232,33 @@ plot(temperature_anomaly_GAM)
 Data_subset_inside$Temperature_prediction <-predict(temperature_anomaly_GAM,Data_subset_inside)
 Data_subset_inside$Temperature_anomaly <-Data_subset_inside$Temperature - Data_subset_inside$Temperature_prediction 
 
-#Set nmax
-nmax=100
-
 #Run test model with tensor product smooth per previous attempt without soap-film
-model_bottom_03_r <- bam(Temperature_difference ~  te(x, y, Temperature_anomaly, Julian_day_s, d=c(2,1,1), bs=c("sf", "tp","cc"), k=c(20,7,7),xt = list(list(bnd = border.aut,nmax=nmax),NULL,NULL))+
-                           te(x, y, Temperature_anomaly, Julian_day_s, d=c(2,1,1), bs=c("sw", "tp","cc"), k=c(20,7,7),xt = list(list(bnd = border.aut,nmax=nmax),NULL,NULL)),
-                         data = Data_subset_inside, method="fREML", discrete=T, nthreads=4, knots =knots_edit)
-#This should give another error about knots being outside boundaries
-#Subset knots as before
-knots_edit_v2<-knots_edit[-c(2),]
-knots_edit_v2<-knots_edit_v2[-c(8),]
-
-#To check where the knots are
-plot(Delta.aut, col="grey")
-points(knots, pch=21, bg="red")
-points(knots_edit, pch=21, bg="purple")
-points(knots_edit_v2, pch=21, bg="blue")
-
-#Run model, should work this time
-model_bottom_03_r <- bam(Temperature_difference ~  te(x, y, Temperature_anomaly, Julian_day_s, d=c(2,1,1), bs=c("sf", "tp","cc"), k=c(20,7,7),xt = list(list(bnd = border.aut,nmax=nmax),NULL,NULL))+
-                           te(x, y, Temperature_anomaly, Julian_day_s, d=c(2,1,1), bs=c("sw", "tp","cc"), k=c(20,7,7),xt = list(list(bnd = border.aut,nmax=nmax),NULL,NULL)),
-                         data = Data_subset_inside, method="fREML", discrete=T, nthreads=4, knots =knots_edit_v2)
-summary(model_bottom_03_r)
-
-#R-sq.(adj) =  0.383   Deviance explained = 40.4%
-#fREML = 4377.7  Scale est. = 0.13458   n = 9508
+model_bottom_03_r <- bam(Temperature_difference ~  te(x, y, Temperature_anomaly, Julian_day_s, d=c(2,1,1), bs=c("sf", "tp","cc"), k=c(20,7,7),xt = list(list(bnd = border.aut),NULL,NULL))+
+                           te(x, y, Temperature_anomaly, Julian_day_s, d=c(2,1,1), bs=c("sw", "tp","cc"), k=c(20,7,7),xt = list(list(bnd = border.aut),NULL,NULL)),
+                         data = Data_subset_inside, method="fREML", discrete=T, nthreads=4, knots =knots_edited)
 
 gam.check(model_bottom_03_r)
 vis.gam(model_bottom_03_r,view=c("x","y"),cond=list(Julian_day_s=0, Temperature_anomaly=-1),plot.type="contour")
 
-
-
-
+# Save model to make predict work
+saveRDS(model_bottom_03_r, "model_bottom_03_r.Rds")
 
 ############################################################################################################################################
 ####################ANYTHING BELOW IS EXPLORATORY CODE 
 
-#Predict function isn't working for the model so Cross-validation code is also not working
+### TO MAKE PREDICT WORK
+# 1) Clear environment
+# 2) restart R
+# 3) Load mgcv
+library(mgcv)
+# 4) load model
+model_bottom_03_r<-readRDS("model_bottom_03_r.Rds")
+
+# 5) Predict
 predict(model_bottom_03_r,newdata=Data_subset_inside)
+
+# 6) Load any other packages you need
+
 #Error in if (!setting_geom) { : missing value where TRUE/FALSE needed
 str(Data_subset_inside)
 
